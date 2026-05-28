@@ -363,7 +363,8 @@ cd("""labels = df[["card_number","label"]].drop_duplicates("card_number").set_in
 feat = pd.DataFrame(index=labels.index)
 for s in [clockwork_cv,clockwork_cnt,off_hours_ratio,overall_off_hours_ratio,off_hours_total,expense_ratio,wholesale_spend_log,token_flag,token_cnt]:
     feat[s.name]=s
-for c in ["total_txns","amount_mean","amount_std","amount_sum","amount_max","n_unique_mcc_log","n_unique_mcc","n_unique_merchants","online_ratio","tokenized_ratio","n_online","n_pos"]:
+feat["total_txns"]=total_txns
+for c in ["amount_mean","amount_std","amount_sum","amount_max","n_unique_mcc_log","n_unique_mcc","n_unique_merchants","online_ratio","tokenized_ratio","n_online","n_pos"]:
     feat[c]=card_agg[c]
 for s in [vendor_concentration,merchant_gini,wholesale_to_logistics_lag,wholesale_logistics_cross_ratio,spending_burst_periodicity,massive_to_small_ratio,b2b_volume_no_recurring,txns_per_merchant,channel_alternation_rate,channel_entropy,cb_ratio,cb_saas_ad_ratio,cb_spend_share,cb_saas_ad_count]:
     feat[s.name]=s
