@@ -1,50 +1,53 @@
-MQD_SUBMISSION - ЧТО ЗДЕСЬ И КАК ИСПОЛЬЗОВАТЬ
-===============================================
+MQD_SUBMISSION - PROJECT OVERVIEW
+==================================
 
-=== ОСНОВНЫЕ ФАЙЛЫ (в корне MQD_submission/) ===
+=== MAIN FILES (in MQD_submission/ root) ===
 
 MQD_2026_Hidden_Entrepreneurs.ipynb
-  - Jupyter ноутбук с полным пайплайном
-  - Открыть: jupyter notebook, запустить Cell -> Run All
-  - Считает данные, строит 35 фич, тренирует CatBoost, считает SHAP
-  - На выходе сохраняет .png и .csv прямо в эту папку
-  - Время выполнения: ~3-5 минут
+  - Jupyter notebook with the full pipeline (56 cells)
+  - Run: Cell -> Run All (~3-5 minutes)
+  - Loads parquet data, builds 35 features, trains CatBoost, computes SHAP
+  - Saves all .png and .csv to this folder
 
 mqd_classifier.py
-  - Тот же пайплайн, но в виде Python-скрипта
-  - Запуск: python mqd_classifier.py
-  - Делает то же самое, только без графиков в Jupyter
+  - Same pipeline as a standalone Python script
+  - Run: python mqd_classifier.py
+  - Works without Jupyter, outputs same results
 
 MQD_pres.pptx
-  - Презентация для защиты (27 слайдов)
-  - Основной файл для сдачи
+  - Defense presentation (27 slides)
+  - Main submission file for the jury
 
-=== ГРАФИКИ ===
+=== OUTPUT FILES ===
 
 confusion_matrix.png
-  - Матрица ошибок: сколько consumer/business карт модель угадала и перепутала
+  - Confusion matrix: how many consumer/business cards the model got right/wrong
 
 feature_importance.png
-  - Топ-15 фич по важности для модели (%)
+  - Top-15 features by importance (%)
 
 shap_summary.png
-  - SHAP summary plot: какие фичи как влияют на предсказание
+  - SHAP summary plot: feature impact direction per card
 
 shap_bar.png
-  - SHAP bar chart: средняя важность фич
+  - SHAP bar chart: mean |SHAP| per feature
 
 top100_hidden_entrepreneurs.csv
-  - 100 карт с наибольшей вероятностью бизнес-активности
-  - Колонки: card_number, business_probability, rank, recommended_product
+  - Top-100 consumer cards with highest business probability
+  - Columns: card_number, business_probability, rank, recommended_product
 
-=== ЕСЛИ НАДО ПЕРЕЗАПУСТИТЬ ===
+=== HOW TO RERUN ===
 
-1. Убедись что все .parquet файлы лежат в той же папке или на рабочем столе в MQD/
-2. Запусти ноутбук: Run All
-3. Графики перезапишутся новыми (с новыми данными, если сплит изменится)
+1. Make sure business_cards_MDQ.parquet, consumer_cards_MDQ.parquet,
+   and merchants_reference.parquet are in the same folder as the notebook
+   (or on Desktop/MQD/)
+2. Open notebook in Jupyter, hit Run All
+3. New .png and .csv will overwrite the old ones
 
-=== ТЕХНИЧЕСКИЕ ДЕТАЛИ ===
+=== TECHNICAL DETAILS ===
 
 - Python 3.12
-- Пакеты: pandas, numpy, catboost, scikit-learn, matplotlib, shap
-- Данные: business_cards_MDQ.parquet, consumer_cards_MDQ.parquet, merchants_reference.parquet
+- Dependencies: pandas, numpy, catboost, scikit-learn, matplotlib, shap
+- Data: 12.8M transactions, 105K cards, 35 features
+- Model: CatBoost (depth=6, lr=0.1, early stopping)
+- Evaluation: AUC-ROC, Confusion Matrix, 5-fold CV, SHAP
