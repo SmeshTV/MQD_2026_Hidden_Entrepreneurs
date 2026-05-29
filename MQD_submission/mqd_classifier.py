@@ -18,9 +18,7 @@ from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
 
-# The script needs to find three .parquet files. Since users run code
-# from different folders (Jupyter root, project root, desktop), we try
-# a few common locations before giving up.
+# parquet files might be in different places depending where you run this
 DATA = Path(".")
 if not (DATA / "business_cards_MDQ.parquet").exists():
     DATA = Path.cwd()
@@ -63,21 +61,13 @@ df = df.merge(
 )
 del bus_cards
 
-# MCC groups are the foundation of all features. Every transaction has
-# an MCC (merchant category code) that tells us what the merchant sells.
-# We split ~900 MCCs into 5 business-relevant groups. The idea: hidden
-# entrepreneurs leave traces in wholesale, logistics, fuel, SaaS/ad
-# spending that regular consumers simply don't have.
-# BUSINESS_MCCS = all codes that hint at business activity (services,
-# wholesale, shipping, manufacturing, professional services). Used as
-# a broad filter for many features.
-# WHOLESALE_PROD_MCCS = subset of BUSINESS_MCCS for actual product
-# purchasing (building materials, office supplies, electronics wholesale).
-# The core signal for "someone is buying stock to resell."
-# LOGISTICS_MCCS + FUEL_MCCS = shipping and fuel. Business owners pay
-# for delivery and fleet fuel. Regular consumers rarely do.
-# SAAS_AD_MCCS = digital services (Google Ads, cloud hosting, domain
-# registrations). Modern entrepreneurs run online businesses.
+# MCC codes tell us what a merchant sells. The idea: hidden entrepreneurs
+# leave traces in wholesale/logistics/fuel/saas spending that regular
+# consumers simply don't have. We split into 5 groups:
+# - BUSINESS_MCCS: broad business filter (services, wholesale, shipping)
+# - WHOLESALE_PROD_MCCS: actual product purchasing - core "buying stock" signal
+# - LOGISTICS_MCCS + FUEL_MCCS: shipping and fleet fuel
+# - SAAS_AD_MCCS: Google Ads, cloud hosting, online platforms
 BUSINESS_MCCS = {
     "7311", "7372", "5968", "4816", "7379", "5734",
     "7392", "7399", "8931", "8111", "8911", "7361",
@@ -109,22 +99,17 @@ SAAS_AD_MCCS = {"7311", "7372", "5968", "4816", "4812", "4814", "7379", "5734"}
 print("\n>>> Feature engineering...")
 
 # 1. Clockwork Buyer
-# A business restocks on a schedule — every Monday morning, or every
-# 2 weeks. A consumer buys randomly — when hungry, bored, or on sale.
-# We measure "purchase regularity" by the coefficient of variation (CV)
-# of time intervals between consecutive purchases in the same MCC.
-# CV = std / mean. Low CV = clockwork regularity = business pattern.
-# High CV = chaotic timing = consumer pattern.
+# Businesses restock on schedule (every Monday, every 2 weeks).
+# Consumers buy randomly. CV = std/mean of inter-purchase intervals.
+# Low CV = clockwork regular = business. High CV = random = consumer.
 print("  [1] Clockwork Buyer - inter-purchase CV")
 df.sort_values(["card_number", "mcc", "transaction_timestamp"], inplace=True)
 
-# Calculate hours between consecutive transactions per card per MCC
 df["interval_hours"] = (
     df.groupby(["card_number", "mcc"])["transaction_timestamp"]
     .diff().dt.total_seconds() / 3600.0
 )
 
-# For each card-MCC pair, compute CV of intervals
 cv_per_card_mcc = (
     df.dropna(subset=["interval_hours"])
     .groupby(["card_number", "mcc"])["interval_hours"]
@@ -132,8 +117,6 @@ cv_per_card_mcc = (
     .rename("cv").reset_index()
 )
 
-# Average CV across all MCCs for each card, plus how many MCCs
-# had enough data to compute CV
 clockwork_cv = cv_per_card_mcc.groupby("card_number")["cv"].mean().rename("clockwork_cv_mean")
 clockwork_cnt = cv_per_card_mcc.dropna(subset=["cv"]).groupby("card_number")["cv"].count().rename("clockwork_mcc_count")
 del cv_per_card_mcc
@@ -141,11 +124,8 @@ df.drop(columns=["interval_hours"], inplace=True)
 print(f"    -> {len(clockwork_cv):,} cards")
 
 # 2. Off-Hours Operator
-# Ordinary people shop during daytime (9 AM - 7 PM). Business owners
-# place orders early morning (before 9), late evening (after 7),
-# or even at night — they work when the shop is quiet.
-# We compute: what share of business-MCC transactions happen outside
-# normal hours? High ratio = likely entrepreneur.
+# Normal people shop 9-19. Business owners place orders at 7 AM or 10 PM.
+# What share of their business-MCC transactions happen off-hours?
 print("  [2] Off-Hours Operator")
 df["txn_hour"] = df["transaction_timestamp"].dt.hour
 df["is_business_mcc"] = df["mcc"].isin(BUSINESS_MCCS)
@@ -159,12 +139,8 @@ total_txns = df.groupby("card_number").size().rename("total_txns")
 overall_off_hours_ratio = (off_hours_total / total_txns).rename("overall_off_hours_ratio")
 
 # 3. Expense Ratio Inversion
-# A normal consumer spends 90%+ on food, clothes, gas, entertainment.
-# A hidden entrepreneur spends a large chunk on wholesale goods —
-# stock for resale. The more spending goes to WHOLESALE_PROD_MCCS,
-# the more likely this card is used for business.
-# wholesale_spend_ratio = wholesale spend / total spend.
-# wholesale_spend_log = log-transformed wholesale amount (handles skew).
+# Consumers spend on food/clothes. Entrepreneurs spend on wholesale stock.
+# wholesale_spend_ratio = wholesale / total. The log version handles skew.
 print("  [3] Expense Ratio Inversion")
 total_spend = df.groupby("card_number")["transaction_amount_kzt"].sum().rename("total_spend_kzt")
 wholesale_spend = df[df["mcc"].isin(WHOLESALE_PROD_MCCS)].groupby("card_number")["transaction_amount_kzt"].sum().rename("wholesale_spend_kzt")
@@ -172,11 +148,9 @@ expense_ratio = (wholesale_spend / total_spend).rename("wholesale_spend_ratio").
 wholesale_spend_log = np.log1p(wholesale_spend).rename("wholesale_spend_log")
 
 # 4. Token Wholesale
-# Tokenized = card saved in a digital wallet or recurring payment.
-# Regular consumers tokenize Netflix or Spotify. Business owners
-# tokenize wholesale suppliers for repeat stock orders.
-# We find tokenized wholesale transactions above the 90th percentile,
-# flagging cards that combine high-value B2B spend with tokenization.
+# Tokenized = card saved for recurring/repeat payments. Consumers tokenize
+# Netflix. Businesses tokenize wholesale suppliers. We flag tokenized
+# wholesale txns above the 90th business percentile.
 print("  [4] Token Wholesale")
 token_wholesale = df[df["mcc"].isin(WHOLESALE_PROD_MCCS) & (df["tokenized"] == True)].copy()
 if len(token_wholesale) > 0:
@@ -191,11 +165,9 @@ token_cnt = token_wholesale[token_wholesale["transaction_amount_kzt"] > p90].gro
 del token_wholesale
 
 # 5. Baseline Aggregations
-# Simple per-card statistics that turned out to be the most powerful
-# signals. tokenized_ratio (share of tokenized txns) and online_ratio
-# (share of online txns) are top-2 features. Business cards are
-# overwhelmingly online + tokenized; consumer cards are mostly POS
-# + non-tokenized.
+# These simple stats turned out to be the strongest signals. tokenized_ratio
+# and online_ratio are #1 and #2. Businesses are overwhelmingly online +
+# tokenized. Consumers mostly pay at POS with plastic.
 print("  [5] Baseline aggregations")
 card_agg = df.groupby("card_number").agg(
     amount_mean=("transaction_amount_kzt", "mean"),
@@ -215,10 +187,8 @@ card_agg["n_unique_mcc_log"] = np.log1p(card_agg["n_unique_mcc"])
 
 # 6. Supplier Fingerprint
 print("  [6] Supplier Fingerprint - vendor concentration")
-# A consumer visits dozens of merchants. A business owner concentrates
-# spend on few regular suppliers. Two metrics:
-# vendor_concentration = top-3 merchants' share of total spend
-# merchant_gini = inequality of spend distribution across merchants
+# A consumer visits tons of places. A business concentrates on a few
+# regular suppliers. Two angles: top-3 spend share + Gini coefficient.
 merchant_spend = df.groupby(["card_number", "merchant_id"])["transaction_amount_kzt"].sum().reset_index()
 
 def _top3_share(g):
@@ -240,10 +210,9 @@ del merchant_spend
 
 # 7. Last-Mile Echo
 print("  [7] Last-Mile Echo - wholesale to logistics lag")
-# Business owners buy stock (wholesale) then ship it (logistics/fuel)
-# within days. Consumers never show this sequence. We measure:
-# wholesale_to_logistics_lag = avg days wholesale → logistics
-# wholesale_to_logistics_count = share of days with BOTH txn types
+# Buy stock → ship it within days. This wholesale→logistics sequence
+# is basically invisible in consumer data. Two metrics: avg lag in days,
+# and share of days where both types appear.
 daily_wholesale = df[df["mcc"].isin(WHOLESALE_PROD_MCCS)].groupby(["card_number", "transaction_date"])["transaction_amount_kzt"].sum().reset_index()
 daily_wholesale.columns = ["card_number", "date", "wholesale_amt"]
 
@@ -278,13 +247,9 @@ wholesale_to_logistics_count = daily_merged[daily_merged["any"]].groupby("card_n
 del daily_wholesale, daily_logistics, daily_merged, logistics_dates_by_card
 
 # 8. Round-Trip Cash Flow (redefined)
-# The original paradox tracked cash-in → cash-out cycles. Our dataset
-# has only outgoing transactions (debit/credit card spend), so we
-# redefined it: business owners have spending "bursts" — days where
-# they spend significantly more than usual (stocking up). These bursts
-# follow a periodic pattern (e.g., every 14 days for biweekly restock).
-# spending_burst_periodicity = std of intervals between top-5% spend
-# days. Low std = regular burst pattern = business behavior.
+# Original paradox: cash-in → cash-out. Our data only has outgoing txns
+# so we redefined it. Business owners have periodic spending "bursts"
+# (top 5% days). How regular are those bursts? Low std = business.
 print("  [8] Round-Trip Cash Flow - spending burst periodicity")
 daily_spend = df.groupby(["card_number", "transaction_date"])["transaction_amount_kzt"].sum().reset_index()
 
@@ -303,11 +268,8 @@ spending_burst_periodicity = daily_spend.groupby("card_number").apply(_burst_per
 del daily_spend
 
 # 9. Inventory Pulse
-# A retailer restocks in a pattern: one large bulk purchase (e.g.,
-# 200,000 KZT of goods) followed by several small top-ups (e.g.,
-# 5,000-10,000 KZT for perishables or emergency restock).
-# massive_to_small_ratio = count of small wholesale txns / count of
-# large wholesale txns. Business: balanced ratio (~1-3). Consumer: N/A.
+# One big bulk order, then several small top-ups (perishables, emergency).
+# Ratio of small/large wholesale txns. Around 1-3 for businesses.
 print("  [9] Inventory Pulse")
 def _inventory_pulse(g):
     w = g[g["mcc"].isin(WHOLESALE_PROD_MCCS)]["transaction_amount_kzt"]
@@ -320,13 +282,9 @@ def _inventory_pulse(g):
 massive_to_small_ratio = df.groupby("card_number").apply(_inventory_pulse, include_groups=False).rename("massive_to_small_ratio")
 
 # 10. Multi-Vendor Loyalty Paradox
-# A regular consumer either stays loyal to one vendor (recurring
-# payments for one service) or shops everywhere (no loyalty).
-# A business owner paradoxically does BOTH: they spend at many
-# different business-service vendors but almost never set up
-# recurring payments for those — they pay per-invoice.
-# b2b_volume_no_recurring = total B2B spending * (1 - recurring_ratio).
-# High value = business spend without auto-pay = entrepreneur.
+# Consumer: either one recurring bill (Netflix) or random shopping.
+# Entrepreneur: spends at many B2B vendors but pays per invoice,
+# not via recurring. b2b_volume_no_recurring captures this.
 print("  [10] Multi-Vendor Loyalty Paradox")
 b2b_spend = df[df["mcc"].isin(BUSINESS_MCCS)].groupby("card_number")["transaction_amount_kzt"].sum()
 recurring_ratio = df.groupby("card_number")["is_recurring"].mean()
@@ -335,14 +293,10 @@ loyalty_score = df.groupby("card_number")["merchant_id"].nunique().rename("merch
 txns_per_merchant = total_txns / loyalty_score
 
 # 11. Channel Schizophrenia
-# A consumer typically uses one channel: either mostly online or
-# mostly in-store. A business owner switches constantly — ordering
-# online from a supplier, buying fuel at a POS terminal, paying for
-# ads online, shipping via POS courier. We track:
-# channel_alternation_rate = how often the channel changes between
-#   consecutive transactions (high = business)
-# channel_entropy = Shannon entropy of channel distribution (high =
-#   balanced mix of online/POS = business)
+# Consumer: mostly online OR mostly in-store. Business owner: switches
+# constantly - orders online, pays courier at POS, buys fuel at POS.
+# alternation_rate = how often channel flips between txns
+# entropy = Shannon entropy of online/POS distribution (balanced = biz)
 print("  [11] Channel Schizophrenia")
 df_sorted = df.sort_values(["card_number", "transaction_timestamp"])
 df_sorted["prev_channel"] = df_sorted.groupby("card_number")["channel"].shift(1)
@@ -359,12 +313,9 @@ channel_entropy = df_sorted.groupby("card_number")["channel"].apply(_channel_ent
 del df_sorted
 
 # 12. Cross-border Sourcing
-# Hidden entrepreneurs frequently pay international providers:
-# Alibaba for goods, Google/Facebook for ads, Cloudflare/AWS for
-# hosting. These cross-border transactions are rare for consumers.
-# We detect: card country ≠ merchant country. Then compute ratios
-# of cross-border transactions overall and within SaaS/ad MCCs.
-# cb_ratio, cb_saas_ad_ratio, cb_spend_share, cb_saas_ad_count.
+# Entrepreneurs pay Alibaba, Google Ads, AWS. Consumers rarely do.
+# card country != merchant country = cross-border. We compute ratios
+# overall and specifically for SaaS/ad MCCs.
 print("  [12] Cross-border Sourcing")
 df["is_cross_border"] = (df["merchant_country"] != df["country"]) & df["merchant_country"].notna()
 df["is_cb_saas_ad"] = df["is_cross_border"] & df["mcc"].isin(SAAS_AD_MCCS)
@@ -381,12 +332,9 @@ df.drop(columns=[
     "is_cb_saas_ad",
 ], inplace=True, errors="ignore")
 
-# assemble feature matrix
-# All features computed above live in separate pandas Series indexed by
-# card_number. Here we merge them into a single table. Each column is
-# one feature, each row is one card. Cards with missing labels are
-# dropped. Some features have NaN (e.g., cards with <5 wholesale txns
-# for Inventory Pulse) — we fill those with sensible defaults.
+# All features are in separate Series indexed by card_number.
+# Merge them into one table. Fill NaN with sensible defaults
+# (median for skewed features, 0 for ratios, 168h for missing lag).
 print("\n>>> Assembling feature matrix...")
 labels = df[["card_number", "label"]].drop_duplicates("card_number").set_index("card_number")["label"]
 
@@ -466,22 +414,16 @@ print(f"  Columns: {list(features.columns)}")
 labels = labels.loc[features.index]
 print(f"  Label distribution:\n{labels.value_counts().to_string()}")
 
-# train/test split
-# We hold out 20% of cards for final evaluation. Stratify ensures the
-# same 76/24 consumer/business ratio in both train and test sets.
+# 20% holdout. Stratify keeps class ratio consistent.
 X_train, X_test, y_train, y_test = train_test_split(
     features.values, labels.values, test_size=0.2, random_state=42, stratify=labels.values,
 )
 feature_names = list(features.columns)
 print(f"  Train: {len(X_train):,}, Test: {len(X_test):,}")
 
-# train CatBoost
-# Why CatBoost? Handles missing values natively, Ordered Boosting
-# reduces overfitting, auto_class_weights="Balanced" compensates for
-# class imbalance (24% business vs 76% consumer), and it consistently
-# beats XGBoost/LightGBM on tabular data.
-# Hyperparams: depth=6 (shallow to avoid overfit), early_stopping=50
-# (stops if no AUC improvement for 50 rounds), learning_rate=0.1.
+# CatBoost because: native NaN handling, Ordered Boosting (less overfit),
+# auto_class_weights for imbalance, and it usually beats XGB/LGBM on
+# tabular data. depth=6, lr=0.1, early_stopping=50 on AUC.
 print("\n>>> Training CatBoost...")
 model = CatBoostClassifier(
     iterations=500, learning_rate=0.1, depth=6,
@@ -491,10 +433,7 @@ model = CatBoostClassifier(
 )
 model.fit(X_train, y_train, eval_set=(X_test, y_test), use_best_model=True)
 
-# 5-fold cross-validation
-# One test-train split could be lucky. CV trains 5 separate models on
-# different 80/20 splits and averages the AUC. If all 5 folds show
-# similarly high AUC, the result is reliable and not overfitted.
+# One split could be luck. 5-fold CV proves the model actually works.
 print("\n>>> 5-fold Cross-Validation...")
 cv_model = CatBoostClassifier(
     iterations=200, learning_rate=0.1, depth=6,
@@ -509,11 +448,8 @@ if "test-AUC-mean" in cv_results.columns:
     print(f"  CV AUC-ROC mean: {cv_results['test-AUC-mean'].iloc[-1]:.4f}")
     print(f"  CV AUC-ROC std:  {cv_results['test-AUC-std'].iloc[-1]:.4f}")
 
-# evaluation
-# AUC-ROC measures how well the model separates business from consumer
-# cards. 1.0 = perfect separation. Confusion matrix shows actual errors:
-# FP = consumers flagged as business, FN = businesses missed.
-# We print precision/recall/F1 for both classes.
+# AUC-ROC measures class separation. CM shows actual mistakes:
+# FP = consumers called business, FN = businesses called consumer.
 print("\n>>> Evaluation...")
 y_pred = model.predict(X_test)
 y_proba = model.predict_proba(X_test)[:, 1]
@@ -555,11 +491,8 @@ plt.tight_layout()
 plt.savefig(DATA / "feature_importance.png", dpi=150)
 print("  -> feature_importance.png")
 
-# SHAP (SHapley Additive exPlanations)
-# Feature importance tells us WHAT matters globally. SHAP tells us WHY
-# each individual card was scored the way it was. We compute SHAP values
-# on a 500-card sample (full test set would be slow). The summary plot
-# shows feature impact direction; the bar plot shows mean |SHAP|.
+# SHAP explains WHY each card scored what it did, not just WHAT matters.
+# 500 sample (full set would be slow). Summary = direction, Bar = magnitude.
 print("\n>>> SHAP...")
 import shap
 
@@ -583,11 +516,8 @@ plt.savefig(DATA / "shap_bar.png", dpi=150, bbox_inches="tight")
 plt.close()
 print("  -> shap_bar.png")
 
-# top-100 hidden entrepreneurs
-# We score all 80,000 consumer cards using the trained model, then pick
-# the 100 with the highest "business probability." These are the cards
-# most likely used for hidden business activity. For each, we assign a
-# recommended banking product based on their strongest behavioral signal.
+# Score all consumer cards, pick top-100 highest business probability.
+# Assign a product based on their strongest behavioral signal.
 print("\n>>> Top 100 Hidden Entrepreneurs...")
 consumer_mask = labels == 0
 consumer_feat = features.loc[consumer_mask]
@@ -600,12 +530,9 @@ top100_scores = consumer_probas[top100_idx]
 
 top100_df = pd.DataFrame({"card_number": top100_cards, "business_probability": top100_scores, "rank": range(1, 101)})
 
-# target product assignment
-# We use median consumer values as thresholds. If a card's wholesale
-# ratio exceeds the median → B2B Cashback (best for procurement spend).
-# If clockwork CV is regular → Working Capital Loan (predictable cash
-# needs). If channel alternation is high → Merchant Account (needs
-# multi-channel payment processing). Otherwise → Business Credit Card.
+# Thresholds = median consumer values. High wholesale → B2B Cashback.
+# Regular clockwork → Working Capital Loan. High channel switching →
+# Merchant Account. None of the above → Business Credit Card.
 print("  Computing target products...")
 feat_consumer = features.loc[consumer_mask]
 cv_th = feat_consumer["clockwork_cv_mean"].median()
